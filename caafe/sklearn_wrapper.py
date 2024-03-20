@@ -214,6 +214,7 @@ class RACAAFEClassifier(CAAFEClassifier):
         embed_model: str,
         collection_name: str,
         distance_func: str,
+        exp_type: str,
         base_classifier: Optional[object] = None,
         optimization_metric: str = "accuracy",
         iterations: int = 10,
@@ -235,11 +236,12 @@ class RACAAFEClassifier(CAAFEClassifier):
             raise ValueError(
                 "distance_func can be 'cosine', 'l2', or 'ip', see ChromaDB docs."
             )
-        client = chromadb.EphemeralClient()
-        embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(
+        self.client = chromadb.EphemeralClient()
+        self.embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name=embed_model
         )
-        collection = client.get_or_create_collection(
+        self.exp_type = exp_type
+        self.collection = self.client.get_or_create_collection(
             name=collection_name,
             embedding_function=embedding_func,
             metadata={"hnsw:space": distance_func},
@@ -315,6 +317,8 @@ class RACAAFEClassifier(CAAFEClassifier):
             self.code, prompt, messages = racaafe.generate_features(
                 ds,
                 df_train,
+                self.collection,
+                self.exp_type,
                 model=self.llm_model,
                 iterative=self.iterations,
                 metric_used=auc_metric,
