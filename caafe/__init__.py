@@ -1,1 +1,1 @@
-from .sklearn_wrapper import CAAFEClassifier
+from .sklearn_wrapper import CAAFEClassifier, RACAAFEClassifier

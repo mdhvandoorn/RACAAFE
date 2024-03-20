@@ -14,7 +14,10 @@ import pandas as pd
 import numpy as np
 from typing import Optional
 import pandas as pd
+import chromadb
+from chromadb.utils import embedding_functions
 
+IMPLEMENTED_DISTANCE_FUNCS = ["cosine", "ip", "l2"]
 
 
 class CAAFEClassifier(BaseEstimator, ClassifierMixin):
@@ -202,3 +205,41 @@ class CAAFEClassifier(BaseEstimator, ClassifierMixin):
     def predict(self, X):
         X = self.predict_preprocess(X)
         return self.base_classifier.predict(X)
+
+
+class RACAAFEClassifier(CAAFEClassifier):
+    def __init__(
+        self,
+        embed_model: str,
+        collection_name: str,
+        distance_func: str,
+        base_classifier: Optional[object] = None,
+        optimization_metric: str = "accuracy",
+        iterations: int = 10,
+        llm_model: str = "gpt-3.5-turbo",
+        n_splits: int = 10,
+        n_repeats: int = 2,
+    ) -> None:
+        super().__init__(
+            base_classifier,
+            optimization_metric,
+            iterations,
+            llm_model,
+            n_splits,
+            n_repeats,
+        )
+        # RACAAFE uses ChromaDB for RAG. Thus, the set of usable distance
+        # functions is dependent on ChromaDB's implementation.
+        if distance_func not in IMPLEMENTED_DISTANCE_FUNCS:
+            raise ValueError(
+                "distance_func can be 'cosine', 'l2', or 'ip', see ChromaDB docs."
+            )
+        client = chromadb.EphemeralClient()
+        embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name=embed_model
+        )
+        collection = client.get_or_create_collection(
+            name=collection_name,
+            embedding_function=embedding_func,
+            metadata={"hnsw:space": distance_func},
+        )
