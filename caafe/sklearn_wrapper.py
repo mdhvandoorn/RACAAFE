@@ -8,7 +8,8 @@ from .preprocessing import (
     make_dataset_numeric,
 )
 from .data import get_X_y
-from .caafe import generate_features
+from . import caafe as caafe
+from . import racaafe as racaafe
 from .metrics import auc_metric, accuracy_metric
 import pandas as pd
 import numpy as np
@@ -133,7 +134,7 @@ class CAAFEClassifier(BaseEstimator, ClassifierMixin):
         if disable_caafe:
             self.code = ""
         else:
-            self.code, prompt, messages = generate_features(
+            self.code, prompt, messages = caafe.generate_features(
                 ds,
                 df_train,
                 model=self.llm_model,
@@ -243,3 +244,108 @@ class RACAAFEClassifier(CAAFEClassifier):
             embedding_function=embedding_func,
             metadata={"hnsw:space": distance_func},
         )
+    def fit(
+        self,
+        X,
+        y,
+        dataset_description,
+        feature_names,
+        target_name,
+        disable_caafe=False,
+    ):
+        """
+        Fit the model to the training data.
+
+        Parameters:
+        -----------
+        X : np.ndarray
+            The training data features.
+        y : np.ndarray
+            The training data target values.
+        dataset_description : str
+            A description of the dataset.
+        feature_names : List[str]
+            The names of the features in the dataset.
+        target_name : str
+            The name of the target variable in the dataset.
+        disable_caafe : bool, optional
+            Whether to disable the CAAFE algorithm, by default False.
+        """
+        self.dataset_description = dataset_description
+        self.feature_names = list(feature_names)
+        self.target_name = target_name
+
+        self.X_ = X
+        self.y_ = y
+
+        if (
+            X.shape[0] > 3000
+            and self.base_classifier.__class__.__name__ == "TabPFNClassifier"
+        ):
+            print(
+                "WARNING: TabPFN may take a long time to run on large datasets. Consider using alternatives (e.g. RandomForestClassifier)"
+            )
+        elif (
+            X.shape[0] > 10000
+            and self.base_classifier.__class__.__name__ == "TabPFNClassifier"
+        ):
+            print(
+                "WARNING: CAAFE may take a long time to run on large datasets."
+            )
+
+        # TODO: expand this object if needed
+        ds = [
+            "dataset",
+            X,
+            y,
+            [],
+            self.feature_names + [target_name],
+            {},
+            dataset_description,
+        ]
+        # Add X and y as one dataframe
+        df_train = pd.DataFrame(
+            X,
+            columns=self.feature_names,
+        )
+        df_train[target_name] = y
+        if disable_caafe:
+            self.code = ""
+        else:
+            self.code, prompt, messages = racaafe.generate_features(
+                ds,
+                df_train,
+                model=self.llm_model,
+                iterative=self.iterations,
+                metric_used=auc_metric,
+                iterative_method=self.base_classifier,
+                display_method="markdown",
+                n_splits=self.n_splits,
+                n_repeats=self.n_repeats,
+            )
+
+        df_train = run_llm_code(
+            self.code,
+            df_train,
+        )
+
+        df_train, _, self.mappings = make_datasets_numeric(
+            df_train,
+            df_test=None,
+            target_column=target_name,
+            return_mappings=True,
+        )
+
+        df_train, y = split_target_column(df_train, target_name)
+
+        X, y = df_train.values, y.values.astype(int)
+        # Check that X and y have correct shape
+        # X, y = check_X_y(X, y)
+
+        # Store the classes seen during fit
+        self.classes_ = unique_labels(y)
+
+        self.base_classifier.fit(X, y)
+
+        # Return the classifier
+        return self
