@@ -141,7 +141,7 @@ class CAAFEClassifier(BaseEstimator, ClassifierMixin):
                 iterative=self.iterations,
                 metric_used=auc_metric,
                 iterative_method=self.base_classifier,
-                display_method="markdown",
+                display_method="print",
                 n_splits=self.n_splits,
                 n_repeats=self.n_repeats,
             )
@@ -243,7 +243,7 @@ class RACAAFEClassifier(CAAFEClassifier):
         self.exp_type = exp_type
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
-            embedding_function=embedding_func,
+            embedding_function=self.embedding_func,
             metadata={"hnsw:space": distance_func},
         )
     def fit(
@@ -323,7 +323,7 @@ class RACAAFEClassifier(CAAFEClassifier):
                 iterative=self.iterations,
                 metric_used=auc_metric,
                 iterative_method=self.base_classifier,
-                display_method="markdown",
+                display_method="print",
                 n_splits=self.n_splits,
                 n_repeats=self.n_repeats,
             )
