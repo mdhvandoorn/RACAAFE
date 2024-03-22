@@ -1,8 +1,10 @@
 import copy
 import numpy as np
+import pandas as pd
 
 import openai
 from sklearn.model_selection import RepeatedKFold
+from sklearn.inspection import permutation_importance
 from .caafe_evaluate import (
     evaluate_dataset,
 )
@@ -24,7 +26,6 @@ given the same initial instructions but applied to other datasets, the
 following insights were extracted:
 {insights}
     """
-
 
 
 def retrieve_experiences(
@@ -50,7 +51,7 @@ def retrieve_experiences(
         n_results=n_results,
     )
 
-    query_results = "\n\n".join(query_results['documents'][0])
+    query_results = "\n\n".join(query_results["documents"][0])
 
     return query_results
 
@@ -217,6 +218,7 @@ def generate_features(
         ss = RepeatedKFold(
             n_splits=n_splits, n_repeats=n_repeats, random_state=0
         )
+
         for train_idx, valid_idx in ss.split(df):
             df_train, df_valid = df.iloc[train_idx], df.iloc[valid_idx]
 
@@ -305,6 +307,7 @@ def generate_features(
             old_rocs += [result_old["acc"]]
             accs += [result_extended["roc"]]
             rocs += [result_extended["acc"]]
+
         return None, rocs, accs, old_rocs, old_accs
 
     messages = [
@@ -330,8 +333,8 @@ def generate_features(
             display_method("Error in LLM API." + str(e))
             continue
         i = i + 1
-        e, rocs, accs, old_rocs, old_accs = execute_and_evaluate_code_block(
-            full_code, code
+        e, rocs, accs, old_rocs, old_accs = (
+            execute_and_evaluate_code_block(full_code, code)
         )
         if e is not None:
             messages += [
@@ -389,4 +392,96 @@ Next codeblock:
         if add_feature:
             full_code += code
 
+    # Exclude label from training set
+    df_features = df.loc[:, df.columns!=ds[4][-1]].copy(deep=True)
+
+    df_train_final = run_llm_code(
+        full_code,
+        df_features,
+        convert_categorical_to_integer=not ds[0].startswith("kaggle"),
+    )
+
+    # Get feature names without label
+    feat_names = df_train_final.columns.to_list()
+
+    # Add label to training set
+    df_train_final = pd.concat([df_train_final, df.loc[:, ds[4][-1]]], axis=1) 
+
+    f_importances = get_permutation_importance(
+        iterative_method, df_train_final, feat_names, metric_used
+    )
+
     return full_code, prompt, messages
+
+
+def get_permutation_importance(
+    model, df: pd.DataFrame, feat_names, metric_used
+) -> pd.DataFrame:
+    """
+    Arguments:
+        df (pd.DataFrame):
+            Dataframe containing target in the last column and features in the
+            previous columns.
+
+        The following metrics are implemented (caafe/metrics.py):
+            - roc_auc. In case of multi-class, one-vs-one (ovo) is applied.
+            - accuracy.
+
+    Returns:
+        pd.DataFrame with a single row containing the averaged feature 
+        importances.
+
+    """
+    ss = RepeatedKFold(n_splits=5, n_repeats=1, random_state=0)
+
+    all_scores = []
+
+    for train_idx, valid_idx in ss.split(df):
+        df_train, df_valid = df.iloc[train_idx], df.iloc[valid_idx]
+
+        y_train = df_train.pop(df_train.columns[-1])
+        x_train = df_train
+
+        model.fit(x_train, y_train)
+
+        y_val = df_valid.pop(df_valid.columns[-1])
+        X_val = df_valid
+        # Retroactively determine the performance metric based on function
+        # metric_used
+        if metric_used.__name__ == "auc_metric":
+            try:
+                r = permutation_importance(
+                    model,
+                    X_val,
+                    y_val,
+                    scoring="roc_auc",
+                    n_repeats=5,
+                    random_state=0,
+                )
+            # In case of multi-class classification
+            except ValueError:
+                r = permutation_importance(
+                    model,
+                    X_val,
+                    y_val,
+                    scoring="roc_auc_ovo",
+                    n_repeats=5,
+                    random_state=0,
+                )
+        elif metric_used.__name__ == "accuracy_metric":
+            r = permutation_importance(
+                model,
+                X_val,
+                y_val,
+                scoring="accuracy",
+                n_repeats=5,
+                random_state=0,
+            )
+
+        all_scores.append(r["importances_mean"])
+
+    all_scores = np.array(all_scores)
+    mean_scores = np.mean(all_scores, axis=0)
+    df_res = pd.DataFrame([mean_scores], columns=feat_names)
+
+    return df_res
