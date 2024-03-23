@@ -17,6 +17,7 @@ from typing import Optional
 import pandas as pd
 import chromadb
 from chromadb.utils import embedding_functions
+from sentence_transformers import SentenceTransformer
 
 IMPLEMENTED_DISTANCE_FUNCS = ["cosine", "ip", "l2"]
 
@@ -33,6 +34,7 @@ class CAAFEClassifier(BaseEstimator, ClassifierMixin):
     n_splits (int, optional): The number of cross-validation splits to use during feature generation. Defaults to 10.
     n_repeats (int, optional): The number of times to repeat the cross-validation during feature generation. Defaults to 2.
     """
+
     def __init__(
         self,
         base_classifier: Optional[object] = None,
@@ -44,7 +46,9 @@ class CAAFEClassifier(BaseEstimator, ClassifierMixin):
     ) -> None:
         self.base_classifier = base_classifier
         if self.base_classifier is None:
-            from tabpfn.scripts.transformer_prediction_interface import TabPFNClassifier
+            from tabpfn.scripts.transformer_prediction_interface import (
+                TabPFNClassifier,
+            )
             import torch
             from functools import partial
 
@@ -237,15 +241,17 @@ class RACAAFEClassifier(CAAFEClassifier):
                 "distance_func can be 'cosine', 'l2', or 'ip', see ChromaDB docs."
             )
         self.client = chromadb.EphemeralClient()
-        self.embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=embed_model
-        )
+        # For manual embeddings
+        self.embed_model = SentenceTransformer(embed_model, device="cpu")
         self.exp_type = exp_type
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
-            embedding_function=self.embedding_func,
+            embedding_function=embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name=embed_model
+            ),
             metadata={"hnsw:space": distance_func},
         )
+
     def fit(
         self,
         X,
@@ -319,6 +325,7 @@ class RACAAFEClassifier(CAAFEClassifier):
                 df_train,
                 self.collection,
                 self.exp_type,
+                self.embed_model,
                 model=self.llm_model,
                 iterative=self.iterations,
                 metric_used=auc_metric,
