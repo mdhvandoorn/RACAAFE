@@ -18,6 +18,7 @@ import pandas as pd
 import chromadb
 from chromadb.utils import embedding_functions
 from sentence_transformers import SentenceTransformer
+from caafe import data
 
 IMPLEMENTED_DISTANCE_FUNCS = ["cosine", "ip", "l2"]
 
@@ -219,6 +220,9 @@ class RACAAFEClassifier(CAAFEClassifier):
         collection_name: str,
         distance_func: str,
         exp_type: str,
+        ephimeral_collection: bool = True,
+        overwrite_collection: bool = False,
+        collection_path: str = "fe_experiences/",
         base_classifier: Optional[object] = None,
         optimization_metric: str = "accuracy",
         iterations: int = 10,
@@ -240,16 +244,49 @@ class RACAAFEClassifier(CAAFEClassifier):
             raise ValueError(
                 "distance_func can be 'cosine', 'l2', or 'ip', see ChromaDB docs."
             )
-        self.client = chromadb.EphemeralClient()
+        
         # For manual embeddings
         self.embed_model = SentenceTransformer(embed_model, device="cpu")
         self.exp_type = exp_type
+
+        if ephimeral_collection:
+            self.client = chromadb.EphemeralClient()
+        else:
+            self.client = chromadb.PersistentClient(path=collection_path)
+
+            if overwrite_collection:
+                try:
+                    self.client.delete_collection(collection_name)
+                # Collection does not exist
+                except ValueError:
+                    pass
+
         self.collection = self.client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name=embed_model
-            ),
-            metadata={"hnsw:space": distance_func},
+                name=collection_name,
+                embedding_function=embedding_functions.SentenceTransformerEmbeddingFunction(
+                    model_name=embed_model
+                ),
+                metadata={"hnsw:space": distance_func},
+            )
+
+    def fit_pandas(self, df, dataset_description, target_column_name, store_experience=True, **kwargs):
+        """
+        Fit the classifier to a pandas DataFrame.
+
+        Parameters:
+        df (pandas.DataFrame): The DataFrame to fit the classifier to.
+        dataset_description (str): A description of the dataset.
+        target_column_name (str): The name of the target column in the DataFrame.
+        **kwargs: Additional keyword arguments to pass to the base classifier's fit method.
+        """
+        feature_columns = list(df.drop(columns=[target_column_name]).columns)
+
+        X, y = (
+            df.drop(columns=[target_column_name]).values,
+            df[target_column_name].values,
+        )
+        return self.fit(
+            X, y, dataset_description, feature_columns, target_column_name, store_experience, **kwargs
         )
 
     def fit(
@@ -259,6 +296,7 @@ class RACAAFEClassifier(CAAFEClassifier):
         dataset_description,
         feature_names,
         target_name,
+        store_experience=True,
         disable_caafe=False,
     ):
         """
@@ -317,6 +355,7 @@ class RACAAFEClassifier(CAAFEClassifier):
             columns=self.feature_names,
         )
         df_train[target_name] = y
+
         if disable_caafe:
             self.code = ""
         else:
@@ -326,6 +365,7 @@ class RACAAFEClassifier(CAAFEClassifier):
                 self.collection,
                 self.exp_type,
                 self.embed_model,
+                store_experience,
                 model=self.llm_model,
                 iterative=self.iterations,
                 metric_used=auc_metric,
@@ -360,3 +400,26 @@ class RACAAFEClassifier(CAAFEClassifier):
 
         # Return the classifier
         return self
+    
+    def gain_experience(self, datasets):
+        for dataset in datasets:
+
+            ds, df_train, df_test, _, _ = data.get_data_split(dataset, seed=0)
+
+            print('==========================================================')
+            print(f'Dataset: {ds[0]}')
+
+            self.code, prompt, messages = racaafe.generate_features(
+                ds,
+                df_train,
+                self.collection,
+                self.exp_type,
+                self.embed_model,
+                model=self.llm_model,
+                iterative=self.iterations,
+                metric_used=auc_metric,
+                iterative_method=self.base_classifier,
+                display_method="print",
+                n_splits=self.n_splits,
+                n_repeats=self.n_repeats,
+            )

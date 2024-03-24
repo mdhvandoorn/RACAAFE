@@ -2,7 +2,6 @@ import copy
 import numpy as np
 import pandas as pd
 import re
-from pprint import pprint
 
 import openai
 from sklearn.model_selection import RepeatedKFold
@@ -17,6 +16,7 @@ def get_examples(examples: str) -> str:
     return f"""
 Given the same instructions, these feature engineering operations on other datasets 
 resulted in the biggest predictive performance gain:
+
 {examples}
     """
 
@@ -26,30 +26,33 @@ def get_insights(insights: str) -> str:
 After analysing the most succesful previous feature engineering operations, 
 given the same initial instructions but applied to other datasets, the 
 following insights were extracted:
+
 {insights}
     """
 
 
 def retrieve_experiences(
-    collection, ds, samples, doc_type: str, n_results: int = 3
+    collection, ds, samples, exp_type: str, n_results: int = 3
 ) -> str:
     """
-    doc_type (str):
+    exp_type (str):
         Specifies the type of feature engineering experience to retrieve
         ('insight' or 'example').
     """
 
-    query = f"""
+    query = [
+        f"""
     Description of the dataset in 'df' (column dtypes might be inaccurate):
     {ds[-1]}
 
     Columns in 'df' (true feature dtypes listed here, categoricals encoded as int):
     {samples}
     """
+    ]
 
     query_results = collection.query(
         query_texts=query,
-        where={"type": {"$eq": doc_type}},
+        where={"exp_type": {"$eq": exp_type}},
         n_results=n_results,
     )
 
@@ -146,7 +149,9 @@ Code formatting for dropping columns:
 df.drop(columns=['XX'], inplace=True)
 ```end
 
+============================================================================
 {fe_experiences}
+============================================================================
 
 Each codeblock generates {how_many} and can drop unused columns (Feature selection).
 Each codeblock ends with ```end and starts with "```python"
@@ -167,7 +172,8 @@ def build_prompt_from_df(ds, df, collection, exp_type, samples, iterative=1):
         },
     }
 
-    fe_experiences = retrieve_experiences(collection, ds, exp_type, samples)
+    fe_experiences = retrieve_experiences(collection, ds, samples, exp_type)
+
     if exp_type == "example":
         fe_experiences = get_examples(fe_experiences)
     elif exp_type == "insight":
@@ -205,6 +211,7 @@ def generate_features(
     collection,
     exp_type,
     embed_model,
+    store_experience,
     model="gpt-3.5-turbo",
     just_print_prompt=False,
     iterative=1,
@@ -361,12 +368,15 @@ def generate_features(
             accs += [result_extended["roc"]]
             rocs += [result_extended["acc"]]
 
-            fe_op_name = list(
-                set(df_train.columns) ^ set(df_train_extended.columns)
-            )[0]
+            fe_op_name = None
 
-            if len(df_train_extended.columns) < len(df_train.columns):
-                fe_op_name = f"remove----{fe_op_name}"
+            if store_experience:
+                fe_op_name = list(
+                    set(df_train.columns) ^ set(df_train_extended.columns)
+                )[0]
+
+                if len(df_train_extended.columns) < len(df_train.columns):
+                    fe_op_name = f"remove----{fe_op_name}"
 
         return None, rocs, accs, old_rocs, old_accs, fe_op_name
 
@@ -456,8 +466,8 @@ Next codeblock:
             if fe_op_name is not None:
                 new_f_code[fe_op_name] = code
 
-    # Check if any features were kept
-    if len(new_f_code.keys()) > 0:
+    # len(new_f_code.keys()) > 0 = Check if any features were kept
+    if store_experience and len(new_f_code.keys()) > 0:
         # Exclude label from training set
         df_features = df.loc[:, df.columns != ds[4][-1]].copy(deep=True)
 
@@ -495,7 +505,7 @@ Next codeblock:
         )
 
         experience = [
-            "".join([experience["context"], experience["experience"]])
+            "\n\n".join([experience["context"], experience["experience"]])
         ]
 
         store_experiences(
