@@ -19,6 +19,7 @@ import chromadb
 from chromadb.utils import embedding_functions
 from sentence_transformers import SentenceTransformer
 from caafe import data
+from typing import Union, Tuple
 
 IMPLEMENTED_DISTANCE_FUNCS = ["cosine", "ip", "l2"]
 
@@ -219,7 +220,6 @@ class RACAAFEClassifier(CAAFEClassifier):
         embed_model: str,
         collection_name: str,
         distance_func: str,
-        exp_type: str,
         ephimeral_collection: bool = True,
         overwrite_collection: bool = False,
         collection_path: str = "fe_experiences/",
@@ -244,10 +244,9 @@ class RACAAFEClassifier(CAAFEClassifier):
             raise ValueError(
                 "distance_func can be 'cosine', 'l2', or 'ip', see ChromaDB docs."
             )
-        
+
         # For manual embeddings
         self.embed_model = SentenceTransformer(embed_model, device="cpu")
-        self.exp_type = exp_type
 
         if ephimeral_collection:
             self.client = chromadb.EphemeralClient()
@@ -262,14 +261,24 @@ class RACAAFEClassifier(CAAFEClassifier):
                     pass
 
         self.collection = self.client.get_or_create_collection(
-                name=collection_name,
-                embedding_function=embedding_functions.SentenceTransformerEmbeddingFunction(
-                    model_name=embed_model
-                ),
-                metadata={"hnsw:space": distance_func},
-            )
+            name=collection_name,
+            embedding_function=embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name=embed_model
+            ),
+            metadata={"hnsw:space": distance_func},
+        )
 
-    def fit_pandas(self, df, dataset_description, target_column_name, store_experience=True, **kwargs):
+    def fit_pandas(
+        self,
+        df,
+        dataset_description,
+        target_column_name,
+        exp_type,
+        use_experience,
+        store_experience=True,
+        keep_logs=False,
+        **kwargs,
+    ):
         """
         Fit the classifier to a pandas DataFrame.
 
@@ -286,7 +295,15 @@ class RACAAFEClassifier(CAAFEClassifier):
             df[target_column_name].values,
         )
         return self.fit(
-            X, y, dataset_description, feature_columns, target_column_name, store_experience, **kwargs
+            X,
+            y,
+            dataset_description,
+            feature_columns,
+            target_column_name,
+            exp_type,
+            use_experience,
+            store_experience,
+            **kwargs,
         )
 
     def fit(
@@ -296,8 +313,11 @@ class RACAAFEClassifier(CAAFEClassifier):
         dataset_description,
         feature_names,
         target_name,
+        exp_type,
+        use_experience,
         store_experience=True,
         disable_caafe=False,
+        keep_logs=False,
     ):
         """
         Fit the model to the training data.
@@ -339,7 +359,6 @@ class RACAAFEClassifier(CAAFEClassifier):
                 "WARNING: CAAFE may take a long time to run on large datasets."
             )
 
-        # TODO: expand this object if needed
         ds = [
             "dataset",
             X,
@@ -359,13 +378,12 @@ class RACAAFEClassifier(CAAFEClassifier):
         if disable_caafe:
             self.code = ""
         else:
-            self.code, prompt, messages = racaafe.generate_features(
+            self.code, prompt, messages, new_f_code, log_feat_eng, log_errors = racaafe.generate_features(
                 ds,
                 df_train,
                 self.collection,
-                self.exp_type,
-                self.embed_model,
-                store_experience,
+                exp_type,
+                use_experience,
                 model=self.llm_model,
                 iterative=self.iterations,
                 metric_used=auc_metric,
@@ -373,7 +391,30 @@ class RACAAFEClassifier(CAAFEClassifier):
                 display_method="print",
                 n_splits=self.n_splits,
                 n_repeats=self.n_repeats,
+                keep_logs=keep_logs,
             )
+
+            # len(new_f_code.keys()) > 0 = Check if any engineered features were 
+            # kept
+            if store_experience and len(new_f_code.keys()) > 0:
+                samples = racaafe.get_data_samples(df_train)    
+
+                f_importances = racaafe.get_feat_importances(
+                    self.code,
+                    new_f_code,
+                    df_train,
+                    ds,
+                    self.base_classifier,
+                    auc_metric,
+                    samples,
+                )
+
+                # Only proceed if at least one added features has a positive feature
+                # importance.
+                if f_importances.apply(lambda x: x > 0).any(axis=1).values[0]:
+                    racaafe.store_experiences(
+                        new_f_code, f_importances, samples, ds, self.embed_model, self.collection
+                    )
 
         df_train = run_llm_code(
             self.code,
@@ -400,21 +441,138 @@ class RACAAFEClassifier(CAAFEClassifier):
 
         # Return the classifier
         return self
-    
-    def gain_experience(self, datasets):
+
+    def gain_experience(self, datasets, exp_type: str, use_experience: bool = True, keep_logs: bool = False):
         for dataset in datasets:
 
             ds, df_train, df_test, _, _ = data.get_data_split(dataset, seed=0)
 
-            print('==========================================================')
-            print(f'Dataset: {ds[0]}')
+            print("==========================================================")
+            print(f"Dataset: {ds[0]}")
 
-            self.code, prompt, messages = racaafe.generate_features(
+            try: 
+                self.code, prompt, messages, new_f_code, log_feat_eng, log_errors = racaafe.generate_features(
+                    ds,
+                    df_train,
+                    self.collection,
+                    exp_type,
+                    use_experience,
+                    model=self.llm_model,
+                    iterative=self.iterations,
+                    metric_used=auc_metric,
+                    iterative_method=self.base_classifier,
+                    display_method="print",
+                    n_splits=self.n_splits,
+                    n_repeats=self.n_repeats,
+                    keep_logs=keep_logs,
+                )
+            # TODO: does this work as expected? No persistent states that need
+            # to be resetted manually?
+            except Exception as e:
+                print(f'In dataset {ds[0]}, the following exception occured:\n{e}')
+                print('\nRetrying once')
+
+                self.code, prompt, messages, new_f_code, log_feat_eng, log_errors = racaafe.generate_features(
+                    ds,
+                    df_train,
+                    self.collection,
+                    exp_type,
+                    use_experience,
+                    model=self.llm_model,
+                    iterative=self.iterations,
+                    metric_used=auc_metric,
+                    iterative_method=self.base_classifier,
+                    display_method="print",
+                    n_splits=self.n_splits,
+                    n_repeats=self.n_repeats,
+                    keep_logs=keep_logs,
+                )
+            
+            # len(new_f_code.keys()) > 0 = Check if any engineered features were 
+            # kept
+            if len(new_f_code.keys()) > 0:
+                samples = racaafe.get_data_samples(df_train)    
+
+                f_importances = racaafe.get_feat_importances(
+                    self.code,
+                    new_f_code,
+                    df_train,
+                    ds,
+                    self.base_classifier,
+                    auc_metric,
+                    samples,
+                )
+
+                # Only proceed if at least one added features has a positive feature
+                # importance.
+                if f_importances.apply(lambda x: x > 0).any(axis=1).values[0]:
+                    racaafe.store_experiences(
+                        new_f_code, f_importances, samples, ds, self.embed_model, self.collection
+                    )
+
+        if keep_logs:
+            return log_feat_eng, log_errors
+        
+        return None, None
+
+    def gain_insights(
+        self, return_ids: bool = False
+    ) -> Tuple[str, Union[list[str], None]]:
+        ex_doc_ids = racaafe.get_example_ids(self.collection)
+        if len(ex_doc_ids) == 0:
+            return "No insights to add", None
+
+        col = self.collection.get(
+            ids=ex_doc_ids, include=["documents", "metadatas"]
+        )
+        new_insights = []
+        new_ids = []
+        new_metadatas = []
+        for i in range(len(col["ids"])):
+            doc = col["documents"][i]
+            doc_id = col["ids"][i]
+            metadata = col["metadatas"][i]
+
+            insights = racaafe.extract_insight(doc)
+
+            start_context = doc.index("Context: ###")
+            context = doc[start_context:]
+            end_context = context.index("###", len("Context: ###"))
+            context = context[: end_context + len("###")]
+
+            new_insight = context + f"\n\nInsights: ###\n\n{insights}\n\n###"
+
+            doc_id_split = doc_id.split("---")
+            new_id = "---".join([doc_id_split[0], "insight", doc_id_split[2]])
+            
+            new_insights.append(new_insight)
+            new_ids.append(new_id)
+            new_metadatas.append(
+                {"exp_type": "insight", "dataset": metadata["dataset"]}
+            )
+
+        try: 
+            self.collection.add(
+                documents=new_insights,
+                metadatas=new_metadatas,
+                ids=new_ids,
+            )
+        except Exception as e:
+            raise RuntimeError(f'Could not add add insights. ChromaDB raised:\n{e}')
+
+        if return_ids:
+            return f"Added {len(new_ids)} new insights", new_ids
+        else:
+            return f"Added {len(new_ids)} new insights", None
+
+    def generate_features(self, ds, df_train, exp_type, use_experience, store_experience, keep_logs: bool = False):
+        try: 
+            self.code, prompt, messages, new_f_code, log_feat_eng, log_errors = racaafe.generate_features(
                 ds,
                 df_train,
                 self.collection,
-                self.exp_type,
-                self.embed_model,
+                exp_type,
+                # use_experience,
                 model=self.llm_model,
                 iterative=self.iterations,
                 metric_used=auc_metric,
@@ -422,4 +580,50 @@ class RACAAFEClassifier(CAAFEClassifier):
                 display_method="print",
                 n_splits=self.n_splits,
                 n_repeats=self.n_repeats,
+                keep_logs=keep_logs,
             )
+        # TODO: does this work as expected? No persistent states that need
+        # to be resetted manually?
+        except Exception as e:
+            print(f'In dataset {ds[0]}, the following exception occured:\n{e}')
+            print('\nRetrying once')
+
+            self.code, prompt, messages, new_f_code, log_feat_eng, log_errors = racaafe.generate_features(
+                ds,
+                df_train,
+                self.collection,
+                exp_type,
+                use_experience,
+                model=self.llm_model,
+                iterative=self.iterations,
+                metric_used=auc_metric,
+                iterative_method=self.base_classifier,
+                display_method="print",
+                n_splits=self.n_splits,
+                n_repeats=self.n_repeats,
+                keep_logs=keep_logs,
+            )
+
+        # len(new_f_code.keys()) > 0 = Check if any engineered features were 
+        # kept
+        if store_experience and len(new_f_code.keys()) > 0:
+            samples = racaafe.get_data_samples(df_train)    
+
+            f_importances = racaafe.get_feat_importances(
+                self.code,
+                new_f_code,
+                df_train,
+                ds,
+                self.base_classifier,
+                auc_metric,
+                samples,
+            )
+
+            # Only proceed if at least one added features has a positive feature
+            # importance.
+            if f_importances.apply(lambda x: x > 0).any(axis=1).values[0]:
+                racaafe.store_experiences(
+                    new_f_code, f_importances, samples, ds, self.embed_model, self.collection
+                )
+
+        return self.code, prompt, messages, new_f_code
