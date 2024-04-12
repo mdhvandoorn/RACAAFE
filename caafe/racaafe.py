@@ -4,36 +4,100 @@ import pandas as pd
 import re
 
 import openai
-from sklearn.model_selection import RepeatedKFold
+from sklearn.model_selection import RepeatedKFold, StratifiedKFold
 from sklearn.inspection import permutation_importance
 from .caafe_evaluate import (
     evaluate_dataset,
 )
 from .run_llm_code import run_llm_code
+from .preprocessing import (
+    make_datasets_numeric,
+    split_target_column,
+)
+from typing import Union
 
 
 def get_examples(examples: str) -> str:
     return f"""
+============================================================================
 Given the same instructions, these feature engineering operations on other datasets 
 resulted in the biggest predictive performance gain:
 
 {examples}
+============================================================================
     """
 
 
 def get_insights(insights: str) -> str:
     return f"""
+============================================================================
 After analysing the most succesful previous feature engineering operations, 
 given the same initial instructions but applied to other datasets, the 
 following insights were extracted:
 
 {insights}
+============================================================================
     """
+
+
+def extract_insight(experience_doc: str) -> str:
+    prompt = f"""{experience_doc}
+
+    From the examples above, what patterns can we observe about the relationship between dataset characteristics (enclosed between Context: ### and ###) and the best feature engineering operations (enclosed between Examples: ### and ###)? 
+    Answer MUST be concise, critical, point-by-point, line-by-line, and brief. 
+    (Only include relevant observations without unnecessary elaboration.)
+    """
+
+    messages = [
+        {
+            "role": "system",
+            "content": "You are an expert datascientist assistant solving Kaggle problems. Answer as concisely as possible.",
+        },
+        {
+            "role": "user",
+            "content": prompt,
+        },
+    ]
+
+    completion = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=messages,
+        temperature=0.5,
+        max_tokens=500,
+    )
+
+    insight = completion["choices"][0]["message"]["content"]
+
+    return insight
+
+
+def get_example_ids(collection) -> list[str]:
+    # Only retrieve ids
+    col = collection.get(include=[])
+
+    # Identify dataset_name-counter combinations with exp_type as 'insight'
+    exclude_combinations = set()
+    for doc_id in col["ids"]:
+        parts = doc_id.split("---")
+        dataset_name, exp_type, counter = parts[0], parts[1], parts[2]
+        if exp_type == "insight":
+            exclude_combinations.add((dataset_name, counter))
+
+    # Collect strings where their dataset_name-counter combination is not
+    # in exclude_combinations
+    ex_doc_ids = []
+    for doc_id in col["ids"]:
+        parts = doc_id.split("---")
+        dataset_name, exp_type, counter = parts[0], parts[1], parts[2]
+        if (dataset_name, counter) not in exclude_combinations:
+            ex_doc_ids.append(doc_id)
+
+    return ex_doc_ids
 
 
 def retrieve_experiences(
     collection, ds, samples, exp_type: str, n_results: int = 3
-) -> str:
+) -> Union[str, None]:
     """
     exp_type (str):
         Specifies the type of feature engineering experience to retrieve
@@ -55,6 +119,10 @@ def retrieve_experiences(
         where={"exp_type": {"$eq": exp_type}},
         n_results=n_results,
     )
+
+    # No experiences retrieved. Possibly empty data store.
+    if len(query_results["documents"][0]) == 0:
+        return None
 
     query_results = "\n\n".join(query_results["documents"][0])
 
@@ -84,7 +152,7 @@ def get_doc_ids(
     return [f"{dataset_name}---{exp_type}---{str(sfx)}" for sfx in suffix]
 
 
-def store_experiences(
+def save_experience_db(
     collection,
     docs: list[list[str]],
     doc_embeddings: list[list[float]],
@@ -148,10 +216,7 @@ Code formatting for dropping columns:
 # Explanation why the column XX is dropped
 df.drop(columns=['XX'], inplace=True)
 ```end
-
-============================================================================
 {fe_experiences}
-============================================================================
 
 Each codeblock generates {how_many} and can drop unused columns (Feature selection).
 Each codeblock ends with ```end and starts with "```python"
@@ -159,7 +224,9 @@ Codeblock:
 """
 
 
-def build_prompt_from_df(ds, df, collection, exp_type, samples, iterative=1):
+def build_prompt_from_df(
+    ds, df, collection, exp_type, samples, use_experience, iterative=1
+):
     data_description_unparsed = ds[-1]
     feature_importance = {}  # xgb_eval(_obj)
 
@@ -174,7 +241,9 @@ def build_prompt_from_df(ds, df, collection, exp_type, samples, iterative=1):
 
     fe_experiences = retrieve_experiences(collection, ds, samples, exp_type)
 
-    if exp_type == "example":
+    if fe_experiences is None or use_experience == False:
+        fe_experiences = ""
+    elif exp_type == "example":
         fe_experiences = get_examples(fe_experiences)
     elif exp_type == "insight":
         fe_experiences = get_insights(fe_experiences)
@@ -210,8 +279,7 @@ def generate_features(
     df,
     collection,
     exp_type,
-    embed_model,
-    store_experience,
+    use_experience: bool = True,
     model="gpt-3.5-turbo",
     just_print_prompt=False,
     iterative=1,
@@ -220,12 +288,21 @@ def generate_features(
     display_method="markdown",
     n_splits=10,
     n_repeats=2,
+    keep_logs=False,
 ):
+    log_feat_eng, log_errors = None, None
+    if keep_logs:
+        log_feat_eng = pd.DataFrame(
+            columns=["ErrorID", "Kept", "RawImplementation"]
+        )
+        log_errors = pd.DataFrame(columns=["ErrorType", "RawError"])
+
     def format_for_display(code):
         code = (
             code.replace("```python", "")
             .replace("```", "")
             .replace("<end>", "")
+            .replace("end", "")
         )
         return code
 
@@ -244,7 +321,13 @@ def generate_features(
     samples = get_data_samples(df)
 
     prompt = build_prompt_from_df(
-        ds, df, collection, exp_type, samples, iterative=iterative
+        ds,
+        df,
+        collection,
+        exp_type,
+        samples,
+        use_experience,
+        iterative=iterative,
     )
 
     if just_print_prompt:
@@ -258,6 +341,9 @@ def generate_features(
         completion = openai.ChatCompletion.create(
             model=model,
             messages=messages,
+            # TODO:
+            # Remove stop paramater since it probably stops ChatGPT from formulating
+            # feature creation and feature selection operations in a single operation.
             stop=["```end"],
             temperature=0.5,
             max_tokens=500,
@@ -363,20 +449,18 @@ def generate_features(
                 finally:
                     sys.stdout = old_stdout
 
-            old_accs += [result_old["roc"]]
-            old_rocs += [result_old["acc"]]
-            accs += [result_extended["roc"]]
-            rocs += [result_extended["acc"]]
+            old_accs += [result_old["acc"]]
+            old_rocs += [result_old["roc"]]
+            accs += [result_extended["acc"]]
+            rocs += [result_extended["roc"]]
 
-            fe_op_name = None
+            # TODO: fix what happens when multiple FE operations are conducted
+            fe_op_name = list(
+                set(df_train.columns) ^ set(df_train_extended.columns)
+            )[0]
 
-            if store_experience:
-                fe_op_name = list(
-                    set(df_train.columns) ^ set(df_train_extended.columns)
-                )[0]
-
-                if len(df_train_extended.columns) < len(df_train.columns):
-                    fe_op_name = f"remove----{fe_op_name}"
+            if len(df_train_extended.columns) < len(df_train.columns):
+                fe_op_name = f"remove----{fe_op_name}"
 
         return None, rocs, accs, old_rocs, old_accs, fe_op_name
 
@@ -417,6 +501,28 @@ def generate_features(
                                 """,
                 },
             ]
+
+            if keep_logs:
+                new_error_log = pd.DataFrame(
+                    {"ErrorType": [type(e)], "RawError": [e]}
+                )
+                log_errors = pd.concat(
+                    [log_errors, new_error_log], ignore_index=True
+                )
+                error_id = log_errors.index[-1]
+                ["ErrorID", "RawImplementation"]
+                new_feat_eng_log = pd.DataFrame(
+                    {
+                        "ErrorID": [error_id],
+                        "Kept": [np.nan],
+                        "RawImplementation": [code],
+                    }
+                )
+                log_feat_eng = pd.concat(
+                    [log_feat_eng, new_feat_eng_log],
+                    ignore_index=True,
+                )
+
             continue
 
         # importances = get_leave_one_out_importance(
@@ -449,7 +555,7 @@ def generate_features(
             + f"{add_feature_sentence}\n"
             + f"\n"
         )
-
+        
         if len(code) > 10:
             messages += [
                 {"role": "assistant", "content": code},
@@ -464,55 +570,76 @@ Next codeblock:
             full_code += code
 
             if fe_op_name is not None:
-                new_f_code[fe_op_name] = code
+                new_f_code[fe_op_name] = [i, code]
 
-    # len(new_f_code.keys()) > 0 = Check if any features were kept
-    if store_experience and len(new_f_code.keys()) > 0:
-        # Exclude label from training set
-        df_features = df.loc[:, df.columns != ds[4][-1]].copy(deep=True)
-
-        df_train_final = run_llm_code(
-            full_code,
-            df_features,
-            convert_categorical_to_integer=not ds[0].startswith("kaggle"),
-        )
-
-        # Get feature names without label
-        feat_names = df_train_final.columns.to_list()
-
-        # Add label to training set
-        df_train_final = pd.concat(
-            [df_train_final, df.loc[:, ds[4][-1]]], axis=1
-        )
-
-        f_importances = get_permutation_importance(
-            iterative_method, df_train_final, feat_names, metric_used
-        )
-
-        f_importances = f_importances.loc[
-            :, ~f_importances.columns.isin(ds[4])
-        ]
-
-        # Only proceed if at least one added features has a positive feature
-        # importance.
-        if f_importances.apply(lambda x: x > 0).any(axis=1).values[0]:
-            experience = compile_experience(
-                new_f_code, f_importances, 3, samples, ds[-1]
+        if keep_logs:
+            new_feat_eng_log = pd.DataFrame(
+                {
+                    "ErrorID": [np.nan],
+                    "Kept": [str(add_feature)],
+                    "RawImplementation": [code],
+                }
+            )
+            log_feat_eng = pd.concat(
+                [log_feat_eng, new_feat_eng_log], ignore_index=True
             )
 
-        context_embedding = embed_document(
-            embed_model, [experience["context"]]
-        )
+    return full_code, prompt, messages, new_f_code, log_feat_eng, log_errors
 
-        experience = [
-            "\n\n".join([experience["context"], experience["experience"]])
-        ]
 
-        store_experiences(
-            collection, experience, context_embedding, "example", ds[0]
-        )
+def get_feat_importances(
+    full_code: str,
+    new_f_code: dict,
+    df: pd.DataFrame,
+    ds,
+    iterative_method,
+    metric_used,
+    samples,
+) -> pd.DataFrame:
+    df_train_final = run_llm_code(
+        full_code,
+        df,
+    )
 
-    return full_code, prompt, messages
+    df_train_final, _ = make_datasets_numeric(
+        df_train_final, df_test=None, target_column=ds[4][-1]
+    )
+
+    # Get feature names without label
+    feat_names = [c for c in df_train_final.columns if c != ds[4][-1]]
+
+    df_train_final, y = split_target_column(df_train_final, ds[4][-1])
+
+    f_importances = get_permutation_importance(
+        iterative_method, df_train_final, y, feat_names, metric_used
+    )
+
+    f_importances = f_importances.loc[:, ~f_importances.columns.isin(ds[4])]
+
+    return f_importances
+
+
+def store_experiences(
+    new_f_code: dict,
+    f_importances: pd.DataFrame,
+    samples,
+    ds,
+    embed_model,
+    collection,
+) -> None:
+    experience = compile_experience(
+        new_f_code, f_importances, 3, samples, ds[-1]
+    )
+
+    context_embedding = embed_document(embed_model, [experience["context"]])
+
+    experience = [
+        "\n\n".join([experience["context"], experience["experience"]])
+    ]
+
+    save_experience_db(
+        collection, experience, context_embedding, "example", ds[0]
+    )
 
 
 def pre_process_fe_code(fe_code: str) -> str:
@@ -535,6 +662,8 @@ def compile_experience(
 
     fe_experiences = {"context": [], "experience": []}
 
+    fe_experiences["context"].append("Context: ###")
+
     fe_experiences["context"].append(
         f"""Description of the dataset in 'df' (column dtypes might be inaccurate):\n{data_description_unparsed}\n"""
     )
@@ -542,6 +671,9 @@ def compile_experience(
     fe_experiences["context"].append(
         f"""Columns in 'df' (true feature dtypes listed here, categoricals encoded as int):\n{samples}"""
     )
+
+    # Close context demarcation
+    fe_experiences["context"].append("###")
 
     f_importances.index = ["f_importance"]
     f_importances = f_importances.T
@@ -551,13 +683,16 @@ def compile_experience(
 
     f_importances = f_importances.iloc[:n_top]
 
+    fe_experiences["experience"].append("Examples: ###")
+
     fe_experiences["experience"].append(
         f"The following feature engineering operations resulted in the best performance increase:"
     )
 
     for index, row in f_importances.iterrows():
         # Remove all comments
-        fe_code = pre_process_fe_code(feature_codes[index])
+        # feature_codes[index] = [iteration nr, feature code]
+        fe_code = pre_process_fe_code(feature_codes[index][1])
         # fe_experiences["experience"].append(fe_code)
 
         if "remove----" in index:
@@ -570,6 +705,9 @@ def compile_experience(
                 f"Added feature '{index}' with code:\n{fe_code}"
             )
 
+    # Close examples demarcation
+    fe_experiences["experience"].append("###")
+
     fe_experiences["context"] = "\n\n".join(fe_experiences["context"])
     fe_experiences["experience"] = "\n\n".join(fe_experiences["experience"])
 
@@ -577,7 +715,7 @@ def compile_experience(
 
 
 def get_permutation_importance(
-    model, df: pd.DataFrame, feat_names, metric_used
+    model, df_x: pd.DataFrame, df_y: pd.DataFrame, feat_names, metric_used
 ) -> pd.DataFrame:
     """
     Arguments:
@@ -594,49 +732,40 @@ def get_permutation_importance(
         importances.
 
     """
-    ss = RepeatedKFold(n_splits=5, n_repeats=1, random_state=0)
+    multi_class = True if len(set(df_y)) > 2 else False
+
+    ss = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
 
     all_scores = []
 
-    for train_idx, valid_idx in ss.split(df):
-        df_train, df_valid = df.iloc[train_idx], df.iloc[valid_idx]
+    for train_idx, valid_idx in ss.split(df_x, df_y):
+        x_train, X_val = df_x.iloc[train_idx], df_x.iloc[valid_idx]
+        y_train, y_val = df_y.iloc[train_idx], df_y.iloc[valid_idx]
 
-        y_train = df_train.pop(df_train.columns[-1])
-        x_train = df_train
+        x_train, y_train = x_train.values, y_train.values.astype(int)
+        X_val, y_val = X_val.values, y_val.values.astype(int)
 
         model.fit(x_train, y_train)
 
-        y_val = df_valid.pop(df_valid.columns[-1])
-        X_val = df_valid
         # Retroactively determine the performance metric based on function
         # metric_used
         if metric_used.__name__ == "auc_metric":
-            try:
-                r = permutation_importance(
-                    model,
-                    X_val,
-                    y_val,
-                    scoring="roc_auc",
-                    n_repeats=5,
-                    random_state=0,
-                )
-            # In case of multi-class classification
-            except ValueError:
-                r = permutation_importance(
-                    model,
-                    X_val,
-                    y_val,
-                    scoring="roc_auc_ovo",
-                    n_repeats=5,
-                    random_state=0,
-                )
+            scoring = "roc_auc_ovo" if multi_class else "roc_auc"
+            r = permutation_importance(
+                model,
+                X_val,
+                y_val,
+                scoring=scoring,
+                n_repeats=1,
+                random_state=0,
+            )
         elif metric_used.__name__ == "accuracy_metric":
             r = permutation_importance(
                 model,
                 X_val,
                 y_val,
                 scoring="accuracy",
-                n_repeats=5,
+                n_repeats=1,
                 random_state=0,
             )
 
