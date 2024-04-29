@@ -15,37 +15,55 @@ from .preprocessing import (
     split_target_column,
 )
 from typing import Union
+from timeit import default_timer as timer
+import logging
+
+INSTRUCTIONS = {
+    "icl": {
+        "query": "Convert this example into vector to look for useful examples: ",
+        "key": "Convert this example into vector for retrieval: ",
+    }
+}
 
 
-def get_examples(examples: str) -> str:
-    return f"""
-============================================================================
-Given the same instructions, these feature engineering operations on other datasets 
-resulted in the biggest predictive performance gain:
+def summmarize_context(model, data_description: str, samples: str) -> str:
 
-{examples}
-============================================================================
-    """
+    data_description = (
+        "Raw dataset description: #########\n"
+        + data_description
+        + "\n#########"
+    )
 
+    samples = "Dataset samples: #########\n" + samples + "\n#########"
 
-def get_insights(insights: str) -> str:
-    return f"""
-============================================================================
-After analysing the most succesful previous feature engineering operations, 
-given the same initial instructions but applied to other datasets, the 
-following insights were extracted:
+    experience_doc = data_description + "\n\n" + samples
 
-{insights}
-============================================================================
-    """
+    prompt = f"""
+    The text below contains a dataset description (enclosed by 'Raw dataset description: #########' and '#########') and some randomly drawn samples from the dataset (enclosed by 'Dataset samples: #########' and '#########'). 
+    Summarize them into a concise but complete description.
+    Incorporate contextual information into the summary that will help other data scientists understand in what ways this dataset is similar to, as well as different from, other datasets. 
+    Only include contextual information that will help other data scientists understand the data, nothing more.
+    Prioritize the raw dataset description and dataset samples for the contextual information.
+    Only if you are very sure: apply your knowledge for the contextual information. 
+    Simply omit parts of the summary if the required information is missing in the raw dataset description and dataset samples and you are not completely sure how to fill the gap with your knowledge.
 
+    Insert header: ** Global Summary **
+    Start your summary with a few sentences containing a global summary of the dataset.
+    This global summary possibly contains the intended use of the dataset; the context in which it was gathered; and the characteristics of the dataset.
 
-def extract_insight(experience_doc: str) -> str:
-    prompt = f"""{experience_doc}
+    Insert header: ** Columns Summary **
+    Structure the second part of the summary as a bullet point list, where each item describes a dataframe column.
+    All columns from the Data samples section should be present. 
+    Make sure to incorporate per list item:
+    - The name of the column, which is copied is exactly from its corresponding entry in the Dataset samples section
+    - The data type of the column
+    - The meaning of the column
+    - The meaning of the values in the column
 
-    From the examples above, what patterns can we observe about the relationship between dataset characteristics (enclosed between Context: ### and ###) and the best feature engineering operations (enclosed between Examples: ### and ###)? 
-    Answer MUST be concise, critical, point-by-point, line-by-line, and brief. 
-    (Only include relevant observations without unnecessary elaboration.)
+    Only if you are very sure: apply your knowledge for the contextual information. 
+    Simply omit parts of the summary if the required information is missing and you are not completely sure how to fill the gap with your knowledge.
+
+    {experience_doc}
     """
 
     messages = [
@@ -60,10 +78,10 @@ def extract_insight(experience_doc: str) -> str:
     ]
 
     completion = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
+        model=model,
         messages=messages,
         temperature=0.5,
-        max_tokens=500,
+        max_tokens=1000,
     )
 
     insight = completion["choices"][0]["message"]["content"]
@@ -71,7 +89,138 @@ def extract_insight(experience_doc: str) -> str:
     return insight
 
 
-def get_example_ids(collection) -> list[str]:
+def get_examples(examples: str) -> str:
+    return f"""
+Below are examples from the most succesful feature engineering operations on other datasets. 
+These examples may not be directly applicable to the current dataset.
+Rather, use them to inform the feature engineering operation on the current dataset that you are about to propose. 
+#############################
+
+{examples}
+
+#############################
+    """
+
+
+def get_insights(insights: str) -> str:
+    return f"""
+Below are lessons from the most succesful feature engineering operations on other datasets. 
+These lessons may not be directly applicable to the current dataset.
+Rather, use them to inform the feature engineering operation on the current dataset that you are about to propose. 
+#############################
+
+{insights}
+
+#############################
+    """
+
+
+def get_limited_insight(model, experience_doc: str, num_sentences: str):
+    prompt = f"""{experience_doc}
+
+    From the examples above, what patterns can we observe about the relationship between dataset characteristics (enclosed between 'Context: ###' and '###') and the best feature engineering operations (enclosed between 'Examples: ###' and '###')? 
+    Answer MUST be concise, critical, point-by-point, line-by-line, and brief. 
+    Only include relevant observations without unnecessary elaboration.
+
+    The number of sentences in your answer may be at most {num_sentences}!
+
+    Make the insight general enough so that it is applicable for feature engineering operations on other datasets.
+    Make the insight specific enough so that it provides actionable information for feature engineering operations on other datasets.
+
+    Answers that have more than {num_sentences} sentences will be rejected. 
+    """
+
+    messages = [
+        {
+            "role": "system",
+            "content": "You are an expert datascientist assistant solving Kaggle problems. Answer as concisely as possible.",
+        },
+        {
+            "role": "user",
+            "content": prompt,
+        },
+    ]
+
+    completion = openai.ChatCompletion.create(
+        model=model,
+        messages=messages,
+        temperature=0.5,
+        max_tokens=1000,
+    )
+
+    limited_insight = completion["choices"][0]["message"]["content"]
+
+    return limited_insight
+
+
+def extract_insight(model, experience_doc: str) -> str:
+    prompt = f"""{experience_doc}
+
+    From the examples above, what patterns can we observe about the relationship between dataset characteristics (enclosed between 'Context: ###' and '###') and the best feature engineering operations (enclosed between 'Examples: ###' and '###')? 
+    Answer MUST be concise, critical, point-by-point, line-by-line, and brief. 
+    (Only include relevant observations without unnecessary elaboration.)
+
+    Make the insight general enough so that it is applicable for feature engineering operations on other datasets.
+    Make the insight specific enough so that it provides actionable information for feature engineering operations on other datasets.
+    """
+
+    messages = [
+        {
+            "role": "system",
+            "content": "You are an expert datascientist assistant solving Kaggle problems. Answer as concisely as possible.",
+        },
+        {
+            "role": "user",
+            "content": prompt,
+        },
+    ]
+
+    completion = openai.ChatCompletion.create(
+        model=model,
+        messages=messages,
+        temperature=0.5,
+        max_tokens=1000,
+    )
+
+    insight = completion["choices"][0]["message"]["content"]
+
+    return insight
+
+
+""" 
+Unittest:
+
+data = [
+    "dataset_1---example---0",
+    "dataset_1---insight---0",
+    "dataset_2---example---1",
+    "dataset_2---example---3",
+    "dataset_2---one_liner---1",
+    "dataset_3---example---0",
+    "dataset_3---insight---0",
+    "dataset_3---one_liner---0",
+]
+"""
+
+
+def get_example_ids(collection, exclude_exp_type: str) -> list[str]:
+    """Get the ids of experiences that are not associated with an abstracted
+    version.
+
+    Args:
+        collection (_type_):
+            ChromaDB collection containing the example documents, as well as
+            their abstracted versions.
+        exclude_exp_type (str):
+            The abstracted representation level to take into account. For
+            example, if the collection contains only 'example' and 'insight'
+            levels, then each example-level experience with an insight-level
+            representation should be ignored.
+
+    Returns:
+        list[str]:
+            List of ID's that do not have an abstracted counterpart.
+    """
     # Only retrieve ids
     col = collection.get(include=[])
 
@@ -80,7 +229,7 @@ def get_example_ids(collection) -> list[str]:
     for doc_id in col["ids"]:
         parts = doc_id.split("---")
         dataset_name, exp_type, counter = parts[0], parts[1], parts[2]
-        if exp_type == "insight":
+        if exp_type == exclude_exp_type:
             exclude_combinations.add((dataset_name, counter))
 
     # Collect strings where their dataset_name-counter combination is not
@@ -89,33 +238,31 @@ def get_example_ids(collection) -> list[str]:
     for doc_id in col["ids"]:
         parts = doc_id.split("---")
         dataset_name, exp_type, counter = parts[0], parts[1], parts[2]
-        if (dataset_name, counter) not in exclude_combinations:
+        if (
+            dataset_name,
+            counter,
+        ) not in exclude_combinations and exp_type == "example":
             ex_doc_ids.append(doc_id)
 
     return ex_doc_ids
 
 
 def retrieve_experiences(
-    collection, ds, samples, exp_type: str, n_results: int = 3
+    collection, data_description, exp_type: str, n_results: int = 3
 ) -> Union[str, None]:
     """
     exp_type (str):
         Specifies the type of feature engineering experience to retrieve
         ('insight' or 'example').
     """
-
-    query = [
-        f"""
-    Description of the dataset in 'df' (column dtypes might be inaccurate):
-    {ds[-1]}
-
-    Columns in 'df' (true feature dtypes listed here, categoricals encoded as int):
-    {samples}
-    """
-    ]
+    query = (
+        INSTRUCTIONS["icl"]["query"]
+        + "Description of the dataset (stored in 'df')\n"
+        + data_description
+    )
 
     query_results = collection.query(
-        query_texts=query,
+        query_texts=[query],
         where={"exp_type": {"$eq": exp_type}},
         n_results=n_results,
     )
@@ -123,6 +270,11 @@ def retrieve_experiences(
     # No experiences retrieved. Possibly empty data store.
     if len(query_results["documents"][0]) == 0:
         return None
+
+    query_results["documents"][0] = [
+        q.replace(INSTRUCTIONS["icl"]["key"], "")
+        for q in query_results["documents"][0]
+    ]
 
     query_results = "\n\n".join(query_results["documents"][0])
 
@@ -154,11 +306,13 @@ def get_doc_ids(
 
 def save_experience_db(
     collection,
-    docs: list[list[str]],
-    doc_embeddings: list[list[float]],
+    docs: list[str],
+    doc_embeddings: list[float],
     exp_type: str,
     dataset_name: str,
 ) -> None:
+
+    docs = [INSTRUCTIONS["icl"]["key"] + doc for doc in docs]
 
     docs_ids = get_doc_ids(collection, docs, dataset_name, exp_type)
 
@@ -216,9 +370,11 @@ Code formatting for dropping columns:
 # Explanation why the column XX is dropped
 df.drop(columns=['XX'], inplace=True)
 ```end
+
 {fe_experiences}
 
-Each codeblock generates {how_many} and can drop unused columns (Feature selection).
+Return a single codeblock that either adds a single useful column OR drops a single irrelevant column (Feature Selection). 
+
 Each codeblock ends with ```end and starts with "```python"
 Codeblock:
 """
@@ -239,14 +395,16 @@ def build_prompt_from_df(
         },
     }
 
-    fe_experiences = retrieve_experiences(collection, ds, samples, exp_type)
-
-    if fe_experiences is None or use_experience == False:
-        fe_experiences = ""
-    elif exp_type == "example":
-        fe_experiences = get_examples(fe_experiences)
-    elif exp_type == "insight":
-        fe_experiences = get_insights(fe_experiences)
+    fe_experiences = ""
+    if use_experience:
+        fe_experiences = retrieve_experiences(collection, ds[-1], exp_type)
+        if fe_experiences is not None:
+            if exp_type == "example":
+                fe_experiences = get_examples(fe_experiences)
+            elif exp_type == "insight" or exp_type == "one_liner":
+                fe_experiences = get_insights(fe_experiences)
+        else:
+            fe_experiences = ""
 
     prompt = get_prompt(
         df,
@@ -257,7 +415,7 @@ def build_prompt_from_df(
         samples=samples,
     )
 
-    return prompt
+    return prompt, fe_experiences
 
 
 def get_data_samples(df: pd.DataFrame) -> str:
@@ -293,9 +451,19 @@ def generate_features(
     log_feat_eng, log_errors = None, None
     if keep_logs:
         log_feat_eng = pd.DataFrame(
-            columns=["ErrorID", "Kept", "RawImplementation"]
+            columns=[
+                "Iteration",
+                "RetrievedExp",
+                "Error",
+                "DeltaROC",
+                "DeltaAcc",
+                "Kept",
+                "RawImplementation",
+            ]
         )
-        log_errors = pd.DataFrame(columns=["ErrorType", "RawError"])
+        log_errors = pd.DataFrame(
+            columns=["Iteration", "ErrorType", "RawError", "PriorCode"]
+        )
 
     def format_for_display(code):
         code = (
@@ -320,7 +488,7 @@ def generate_features(
 
     samples = get_data_samples(df)
 
-    prompt = build_prompt_from_df(
+    prompt, fe_experiences = build_prompt_from_df(
         ds,
         df,
         collection,
@@ -341,28 +509,24 @@ def generate_features(
         completion = openai.ChatCompletion.create(
             model=model,
             messages=messages,
-            # TODO:
-            # Remove stop paramater since it probably stops ChatGPT from formulating
-            # feature creation and feature selection operations in a single operation.
             stop=["```end"],
             temperature=0.5,
             max_tokens=500,
         )
         code = completion["choices"][0]["message"]["content"]
-
         code = (
             code.replace("```python", "")
             .replace("```", "")
             .replace("<end>", "")
         )
-
         return code
 
     def execute_and_evaluate_code_block(full_code, code):
         old_accs, old_rocs, accs, rocs = [], [], [], []
 
+        # , random_state=0
         ss = RepeatedKFold(
-            n_splits=n_splits, n_repeats=n_repeats, random_state=0
+            n_splits=n_splits, n_repeats=n_repeats
         )
 
         for train_idx, valid_idx in ss.split(df):
@@ -432,7 +596,7 @@ def generate_features(
                         name=ds[0],
                         method=iterative_method,
                         metric_used=metric_used,
-                        seed=0,
+                        seed=None,
                         target_name=ds[4][-1],
                     )
 
@@ -443,7 +607,7 @@ def generate_features(
                         name=ds[0],
                         method=iterative_method,
                         metric_used=metric_used,
-                        seed=0,
+                        seed=None,
                         target_name=ds[4][-1],
                     )
                 finally:
@@ -454,13 +618,19 @@ def generate_features(
             accs += [result_extended["acc"]]
             rocs += [result_extended["roc"]]
 
-            # TODO: fix what happens when multiple FE operations are conducted
-            fe_op_name = list(
-                set(df_train.columns) ^ set(df_train_extended.columns)
-            )[0]
+            fe_op_name = None
 
-            if len(df_train_extended.columns) < len(df_train.columns):
-                fe_op_name = f"remove----{fe_op_name}"
+            if len(df_train_extended.columns) > len(df_train.columns):
+                fe_op_name = list(
+                    set(df_train_extended.columns) - set(df_train.columns)
+                )
+                fe_op_name = fe_op_name[0]
+
+        logging.info(
+            f"set(df_train_extended.columns):\n{set(df_train_extended.columns)}"
+        )
+        logging.info(f"set(df_train.columns):\n{set(df_train.columns)}")
+        logging.info(f"fe_op_name:\n{fe_op_name}")
 
         return None, rocs, accs, old_rocs, old_accs, fe_op_name
 
@@ -474,18 +644,20 @@ def generate_features(
             "content": prompt,
         },
     ]
-    display_method(f"*Dataset description:*\n {ds[-1]}")
 
     n_iter = iterative
     full_code = ""
     new_f_code = {}
 
     i = 0
+
+    start_loop = timer()
     while i < n_iter:
         try:
             code = generate_code(messages)
         except Exception as e:
             display_method("Error in LLM API." + str(e))
+            logging.info("Error in LLM API." + str(e))
             continue
         i = i + 1
         e, rocs, accs, old_rocs, old_accs, fe_op_name = (
@@ -503,17 +675,34 @@ def generate_features(
             ]
 
             if keep_logs:
+                logging.warning(
+                    "======================================================="
+                )
+                logging.warning("generate_code()")
+                logging.warning(f"messages:\n{messages}")
+                logging.warning(
+                    "======================================================="
+                )
+
                 new_error_log = pd.DataFrame(
-                    {"ErrorType": [type(e)], "RawError": [e]}
+                    {
+                        "Iteration": [i],
+                        "ErrorType": [type(e)],
+                        "RawError": [e],
+                        "PriorCode": [full_code],
+                    }
                 )
                 log_errors = pd.concat(
                     [log_errors, new_error_log], ignore_index=True
                 )
-                error_id = log_errors.index[-1]
-                ["ErrorID", "RawImplementation"]
+
                 new_feat_eng_log = pd.DataFrame(
                     {
-                        "ErrorID": [error_id],
+                        "Iteration": [i],
+                        "RetrievedExp": [fe_experiences],
+                        "Error": True,
+                        "DeltaROC": [np.nan],
+                        "DeltaAcc": [np.nan],
                         "Kept": [np.nan],
                         "RawImplementation": [code],
                     }
@@ -555,17 +744,26 @@ def generate_features(
             + f"{add_feature_sentence}\n"
             + f"\n"
         )
-        
-        if len(code) > 10:
-            messages += [
-                {"role": "assistant", "content": code},
-                {
-                    "role": "user",
-                    "content": f"""Performance after adding feature ROC {np.nanmean(rocs):.3f}, ACC {np.nanmean(accs):.3f}. {add_feature_sentence}
+        logging.info(
+            "\n"
+            + f"*Iteration {i}*\n"
+            + f"```python\n{format_for_display(code)}\n```\n"
+            + f"Performance before adding features ROC {np.nanmean(old_rocs):.3f}, ACC {np.nanmean(old_accs):.3f}.\n"
+            + f"Performance after adding features ROC {np.nanmean(rocs):.3f}, ACC {np.nanmean(accs):.3f}.\n"
+            + f"Improvement ROC {improvement_roc:.3f}, ACC {improvement_acc:.3f}.\n"
+            + f"{add_feature_sentence}\n"
+            + f"\n"
+        )
+
+        messages += [
+            {"role": "assistant", "content": code},
+            {
+                "role": "user",
+                "content": f"""Performance after adding feature ROC {np.nanmean(rocs):.3f}, ACC {np.nanmean(accs):.3f}. {add_feature_sentence}
 Next codeblock:
 """,
-                },
-            ]
+            },
+        ]
         if add_feature:
             full_code += code
 
@@ -575,7 +773,11 @@ Next codeblock:
         if keep_logs:
             new_feat_eng_log = pd.DataFrame(
                 {
-                    "ErrorID": [np.nan],
+                    "Iteration": [i],
+                    "RetrievedExp": [fe_experiences],
+                    "Error": [False],
+                    "DeltaROC": [improvement_roc],
+                    "DeltaAcc": [improvement_acc],
                     "Kept": [str(add_feature)],
                     "RawImplementation": [code],
                 }
@@ -583,6 +785,28 @@ Next codeblock:
             log_feat_eng = pd.concat(
                 [log_feat_eng, new_feat_eng_log], ignore_index=True
             )
+
+    end_loop = timer()
+
+    log_time = pd.DataFrame(
+        {
+            "label": ["fe_its"],
+            "DataName": [ds[0]],
+            "time": [end_loop - start_loop],
+        }
+    )
+
+    log_time.to_csv(
+        "logs/Time.csv",
+        index=False,
+        mode="a",
+        sep=";",
+        header=False,
+        decimal=",",
+    )
+
+    log_feat_eng.insert(loc=0, column="DataName", value=ds[0])
+    log_errors.insert(loc=0, column="DataName", value=ds[0])
 
     return full_code, prompt, messages, new_f_code, log_feat_eng, log_errors
 
@@ -595,6 +819,7 @@ def get_feat_importances(
     iterative_method,
     metric_used,
     samples,
+    random_state=None
 ) -> pd.DataFrame:
     df_train_final = run_llm_code(
         full_code,
@@ -610,8 +835,10 @@ def get_feat_importances(
 
     df_train_final, y = split_target_column(df_train_final, ds[4][-1])
 
+    timeit_start = timer()
+
     f_importances = get_permutation_importance(
-        iterative_method, df_train_final, y, feat_names, metric_used
+        iterative_method, df_train_final, y, feat_names, metric_used, random_state
     )
 
     f_importances = f_importances.loc[:, ~f_importances.columns.isin(ds[4])]
@@ -626,9 +853,11 @@ def store_experiences(
     ds,
     embed_model,
     collection,
+    n_top: int,
+    min_score: float = 0,
 ) -> None:
     experience = compile_experience(
-        new_f_code, f_importances, 3, samples, ds[-1]
+        new_f_code, f_importances, n_top, ds[-1], min_score=min_score
     )
 
     context_embedding = embed_document(embed_model, [experience["context"]])
@@ -656,8 +885,8 @@ def compile_experience(
     feature_codes: dict,
     f_importances: pd.DataFrame,
     n_top: int,
-    samples: str,
-    data_description_unparsed: str,
+    data_description: str,
+    min_score: float = 0,
 ) -> dict:
 
     fe_experiences = {"context": [], "experience": []}
@@ -665,11 +894,7 @@ def compile_experience(
     fe_experiences["context"].append("Context: ###")
 
     fe_experiences["context"].append(
-        f"""Description of the dataset in 'df' (column dtypes might be inaccurate):\n{data_description_unparsed}\n"""
-    )
-
-    fe_experiences["context"].append(
-        f"""Columns in 'df' (true feature dtypes listed here, categoricals encoded as int):\n{samples}"""
+        f"""Description of the dataset (stored in 'df'):\n{data_description}\n"""
     )
 
     # Close context demarcation
@@ -679,7 +904,9 @@ def compile_experience(
     f_importances = f_importances.T
     f_importances = f_importances.sort_values("f_importance", ascending=False)
 
-    f_importances = f_importances.loc[f_importances["f_importance"] > 0]
+    f_importances = f_importances.loc[
+        f_importances["f_importance"] >= min_score
+    ]
 
     f_importances = f_importances.iloc[:n_top]
 
@@ -715,7 +942,7 @@ def compile_experience(
 
 
 def get_permutation_importance(
-    model, df_x: pd.DataFrame, df_y: pd.DataFrame, feat_names, metric_used
+    model, df_x: pd.DataFrame, df_y: pd.DataFrame, feat_names, metric_used, random_state=None
 ) -> pd.DataFrame:
     """
     Arguments:
@@ -734,7 +961,7 @@ def get_permutation_importance(
     """
     multi_class = True if len(set(df_y)) > 2 else False
 
-    ss = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+    ss = StratifiedKFold(n_splits=5, shuffle=True, random_state=random_state)
 
     all_scores = []
 
@@ -757,7 +984,7 @@ def get_permutation_importance(
                 y_val,
                 scoring=scoring,
                 n_repeats=1,
-                random_state=0,
+                random_state=random_state
             )
         elif metric_used.__name__ == "accuracy_metric":
             r = permutation_importance(
@@ -766,7 +993,7 @@ def get_permutation_importance(
                 y_val,
                 scoring="accuracy",
                 n_repeats=1,
-                random_state=0,
+                random_state=random_state
             )
 
         all_scores.append(r["importances_mean"])

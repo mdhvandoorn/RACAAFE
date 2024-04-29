@@ -19,9 +19,19 @@ import chromadb
 from chromadb.utils import embedding_functions
 from sentence_transformers import SentenceTransformer
 from caafe import data
+from caafe.racaafe_logging import add_feat_importance_fe_log
 from typing import Union, Tuple
+from timeit import default_timer as timer
+import logging
 
 IMPLEMENTED_DISTANCE_FUNCS = ["cosine", "ip", "l2"]
+
+INSTRUCTIONS = {
+    "icl": {
+        "query": "Convert this example into vector to look for useful examples: ",
+        "key": "Convert this example into vector for retrieval: ",
+    }
+}
 
 
 class CAAFEClassifier(BaseEstimator, ClassifierMixin):
@@ -36,7 +46,6 @@ class CAAFEClassifier(BaseEstimator, ClassifierMixin):
     n_splits (int, optional): The number of cross-validation splits to use during feature generation. Defaults to 10.
     n_repeats (int, optional): The number of times to repeat the cross-validation during feature generation. Defaults to 2.
     """
-
     def __init__(
         self,
         base_classifier: Optional[object] = None,
@@ -48,9 +57,7 @@ class CAAFEClassifier(BaseEstimator, ClassifierMixin):
     ) -> None:
         self.base_classifier = base_classifier
         if self.base_classifier is None:
-            from tabpfn.scripts.transformer_prediction_interface import (
-                TabPFNClassifier,
-            )
+            from tabpfn.scripts.transformer_prediction_interface import TabPFNClassifier
             import torch
             from functools import partial
 
@@ -316,6 +323,8 @@ class RACAAFEClassifier(CAAFEClassifier):
         exp_type,
         use_experience,
         store_experience=True,
+        keep_top_n: int = 3,
+        min_feat_score: float = 0,
         disable_caafe=False,
         keep_logs=False,
     ):
@@ -374,11 +383,17 @@ class RACAAFEClassifier(CAAFEClassifier):
             columns=self.feature_names,
         )
         df_train[target_name] = y
-
         if disable_caafe:
             self.code = ""
         else:
-            self.code, prompt, messages, new_f_code, log_feat_eng, log_errors = racaafe.generate_features(
+            (
+                self.code,
+                prompt,
+                messages,
+                new_f_code,
+                log_feat_eng,
+                log_errors,
+            ) = racaafe.generate_features(
                 ds,
                 df_train,
                 self.collection,
@@ -394,10 +409,10 @@ class RACAAFEClassifier(CAAFEClassifier):
                 keep_logs=keep_logs,
             )
 
-            # len(new_f_code.keys()) > 0 = Check if any engineered features were 
+            # len(new_f_code.keys()) > 0 = Check if any engineered features were
             # kept
             if store_experience and len(new_f_code.keys()) > 0:
-                samples = racaafe.get_data_samples(df_train)    
+                samples = racaafe.get_data_samples(df_train)
 
                 f_importances = racaafe.get_feat_importances(
                     self.code,
@@ -411,9 +426,16 @@ class RACAAFEClassifier(CAAFEClassifier):
 
                 # Only proceed if at least one added features has a positive feature
                 # importance.
-                if f_importances.apply(lambda x: x > 0).any(axis=1).values[0]:
+                if f_importances.apply(lambda x: x >= min_feat_score).any(axis=1).values[0]:
                     racaafe.store_experiences(
-                        new_f_code, f_importances, samples, ds, self.embed_model, self.collection
+                        new_f_code,
+                        f_importances,
+                        samples,
+                        ds,
+                        self.embed_model,
+                        self.collection,
+                        keep_top_n,
+                        min_score=min_feat_score
                     )
 
         df_train = run_llm_code(
@@ -442,153 +464,40 @@ class RACAAFEClassifier(CAAFEClassifier):
         # Return the classifier
         return self
 
-    def gain_experience(self, datasets, exp_type: str, use_experience: bool = True, keep_logs: bool = False):
+    def gain_experience(
+        self,
+        datasets,
+        exp_type: str,
+        use_experience: bool = True,
+        keep_top_n: int = 3,
+        min_feat_score: float = 0,
+        keep_logs: bool = False,
+    ):
+        log_feat_eng = pd.DataFrame()
+        log_errors = pd.DataFrame()
+
         for dataset in datasets:
 
-            ds, df_train, df_test, _, _ = data.get_data_split(dataset, seed=0)
+            ds, df_train, df_test, _, _ = data.get_data_split(dataset, set_clean_description=False, seed=None)
+
+            target_column_name = ds[4][-1]
+
+            df_train, df_test = make_datasets_numeric(
+                df_train, df_test, target_column_name
+            )
 
             print("==========================================================")
             print(f"Dataset: {ds[0]}")
+            logging.info(f"Dataset: {ds[0]}")
 
-            try: 
-                self.code, prompt, messages, new_f_code, log_feat_eng, log_errors = racaafe.generate_features(
-                    ds,
-                    df_train,
-                    self.collection,
-                    exp_type,
-                    use_experience,
-                    model=self.llm_model,
-                    iterative=self.iterations,
-                    metric_used=auc_metric,
-                    iterative_method=self.base_classifier,
-                    display_method="print",
-                    n_splits=self.n_splits,
-                    n_repeats=self.n_repeats,
-                    keep_logs=keep_logs,
-                )
-            # TODO: does this work as expected? No persistent states that need
-            # to be resetted manually?
-            except Exception as e:
-                print(f'In dataset {ds[0]}, the following exception occured:\n{e}')
-                print('\nRetrying once')
-
-                self.code, prompt, messages, new_f_code, log_feat_eng, log_errors = racaafe.generate_features(
-                    ds,
-                    df_train,
-                    self.collection,
-                    exp_type,
-                    use_experience,
-                    model=self.llm_model,
-                    iterative=self.iterations,
-                    metric_used=auc_metric,
-                    iterative_method=self.base_classifier,
-                    display_method="print",
-                    n_splits=self.n_splits,
-                    n_repeats=self.n_repeats,
-                    keep_logs=keep_logs,
-                )
-            
-            # len(new_f_code.keys()) > 0 = Check if any engineered features were 
-            # kept
-            if len(new_f_code.keys()) > 0:
-                samples = racaafe.get_data_samples(df_train)    
-
-                f_importances = racaafe.get_feat_importances(
-                    self.code,
-                    new_f_code,
-                    df_train,
-                    ds,
-                    self.base_classifier,
-                    auc_metric,
-                    samples,
-                )
-
-                # Only proceed if at least one added features has a positive feature
-                # importance.
-                if f_importances.apply(lambda x: x > 0).any(axis=1).values[0]:
-                    racaafe.store_experiences(
-                        new_f_code, f_importances, samples, ds, self.embed_model, self.collection
-                    )
-
-        if keep_logs:
-            return log_feat_eng, log_errors
-        
-        return None, None
-
-    def gain_insights(
-        self, return_ids: bool = False
-    ) -> Tuple[str, Union[list[str], None]]:
-        ex_doc_ids = racaafe.get_example_ids(self.collection)
-        if len(ex_doc_ids) == 0:
-            return "No insights to add", None
-
-        col = self.collection.get(
-            ids=ex_doc_ids, include=["documents", "metadatas"]
-        )
-        new_insights = []
-        new_ids = []
-        new_metadatas = []
-        for i in range(len(col["ids"])):
-            doc = col["documents"][i]
-            doc_id = col["ids"][i]
-            metadata = col["metadatas"][i]
-
-            insights = racaafe.extract_insight(doc)
-
-            start_context = doc.index("Context: ###")
-            context = doc[start_context:]
-            end_context = context.index("###", len("Context: ###"))
-            context = context[: end_context + len("###")]
-
-            new_insight = context + f"\n\nInsights: ###\n\n{insights}\n\n###"
-
-            doc_id_split = doc_id.split("---")
-            new_id = "---".join([doc_id_split[0], "insight", doc_id_split[2]])
-            
-            new_insights.append(new_insight)
-            new_ids.append(new_id)
-            new_metadatas.append(
-                {"exp_type": "insight", "dataset": metadata["dataset"]}
-            )
-
-        try: 
-            self.collection.add(
-                documents=new_insights,
-                metadatas=new_metadatas,
-                ids=new_ids,
-            )
-        except Exception as e:
-            raise RuntimeError(f'Could not add add insights. ChromaDB raised:\n{e}')
-
-        if return_ids:
-            return f"Added {len(new_ids)} new insights", new_ids
-        else:
-            return f"Added {len(new_ids)} new insights", None
-
-    def generate_features(self, ds, df_train, exp_type, use_experience, store_experience, keep_logs: bool = False):
-        try: 
-            self.code, prompt, messages, new_f_code, log_feat_eng, log_errors = racaafe.generate_features(
-                ds,
-                df_train,
-                self.collection,
-                exp_type,
-                # use_experience,
-                model=self.llm_model,
-                iterative=self.iterations,
-                metric_used=auc_metric,
-                iterative_method=self.base_classifier,
-                display_method="print",
-                n_splits=self.n_splits,
-                n_repeats=self.n_repeats,
-                keep_logs=keep_logs,
-            )
-        # TODO: does this work as expected? No persistent states that need
-        # to be resetted manually?
-        except Exception as e:
-            print(f'In dataset {ds[0]}, the following exception occured:\n{e}')
-            print('\nRetrying once')
-
-            self.code, prompt, messages, new_f_code, log_feat_eng, log_errors = racaafe.generate_features(
+            (
+                self.code,
+                prompt,
+                messages,
+                new_f_code,
+                it_log_feat_eng,
+                it_log_errors,
+            ) = racaafe.generate_features(
                 ds,
                 df_train,
                 self.collection,
@@ -604,10 +513,213 @@ class RACAAFEClassifier(CAAFEClassifier):
                 keep_logs=keep_logs,
             )
 
-        # len(new_f_code.keys()) > 0 = Check if any engineered features were 
+            logging.info(f"new_f_code:\n{new_f_code}")
+
+            logging.info(f"it_log_feat_eng:\n{it_log_feat_eng}")
+
+            logging.info(f"it_log_errors:\n{it_log_errors}")
+
+            f_importances = None
+            # len(new_f_code.keys()) > 0 = Check if any engineered features were
+            # kept
+            if len(new_f_code.keys()) > 0:
+                samples = racaafe.get_data_samples(df_train)
+
+                start_f_importances = timer()
+
+                f_importances = racaafe.get_feat_importances(
+                    self.code,
+                    new_f_code,
+                    df_train,
+                    ds,
+                    self.base_classifier,
+                    auc_metric,
+                    samples,
+                )
+
+                end_f_importances = timer()
+
+                log_time = pd.DataFrame(
+                    {
+                        "label": ["f_importances"],
+                        "DataName": [dataset[0]],
+                        "time": [end_f_importances - start_f_importances],
+                    }
+                )
+
+                log_time.to_csv(
+                    "logs/Time.csv",
+                    index=False,
+                    mode="a",
+                    sep=";",
+                    header=False,
+                    decimal=",",
+                )
+
+                logging.info(f"f_importances:\n{f_importances}")
+
+                # Only proceed if at least one added features has a positive feature
+                # importance.
+                if f_importances.apply(lambda x: x >= min_feat_score).any(axis=1).values[0]:
+                    racaafe.store_experiences(
+                        new_f_code,
+                        f_importances,
+                        samples,
+                        ds,
+                        self.embed_model,
+                        self.collection,
+                        keep_top_n, 
+                        min_score=min_feat_score,
+                    )
+            
+            if keep_logs:
+                it_log_feat_eng = add_feat_importance_fe_log(
+                        it_log_feat_eng, new_f_code, f_importances
+                    )
+
+                logging.info(f"it_log_feat_eng with rank:\n{it_log_feat_eng}")
+
+                log_feat_eng = pd.concat(
+                        [log_feat_eng, it_log_feat_eng], ignore_index=True
+                    )
+                log_errors = pd.concat(
+                    [log_errors, it_log_errors], ignore_index=True
+                )
+
+        if keep_logs:
+            return log_feat_eng, log_errors
+
+        return None, None
+
+    def get_experience_abstractions(
+        self, abstraction_level, return_ids: bool = False
+    ) -> Tuple[str, Union[list[str], None]]:
+        # Beware: abstraction_level argument will be directly used for metadata
+        # and ID's of generated documents and will therefore be inserted in the DB.
+        permitted_levels = ["insight", "one_liner"]
+        if abstraction_level not in permitted_levels:
+            raise ValueError(
+                f"abstraction_level should be one of {permitted_levels}. Received {abstraction_level}"
+            )
+
+        ex_doc_ids = racaafe.get_example_ids(
+            self.collection, abstraction_level
+        )
+        if len(ex_doc_ids) == 0:
+            return (
+                f"No abstractions to add for abstraction_level={abstraction_level}",
+                None,
+            )
+
+        col = self.collection.get(
+            ids=ex_doc_ids, include=["documents", "metadatas"]
+        )
+
+        col["documents"] = [
+            q.replace(INSTRUCTIONS["icl"]["key"], "") for q in col["documents"]
+        ]
+
+        new_abstractions = []
+        new_ids = []
+        new_metadatas = []
+        for i in range(len(col["ids"])):
+            doc = col["documents"][i]
+            doc_id = col["ids"][i]
+            metadata = col["metadatas"][i]
+
+            if abstraction_level == "insight":
+                abstracted = racaafe.extract_insight(self.llm_model, doc)
+            elif abstraction_level == "one_liner":
+                abstracted = racaafe.get_limited_insight(
+                    self.llm_model, doc, 1
+                )
+
+            start_context = doc.index("Context: ###")
+            context = doc[start_context:]
+            end_context = context.index("###", len("Context: ###"))
+            context = context[: end_context + len("###")]
+
+            new_abstraction = (
+                context + f"\n\nInsights: ###\n\n{abstracted}\n\n###"
+            )
+
+            doc_id_split = doc_id.split("---")
+            new_id = "---".join(
+                [doc_id_split[0], abstraction_level, doc_id_split[2]]
+            )
+
+            new_abstractions.append(new_abstraction)
+            new_ids.append(new_id)
+            new_metadatas.append(
+                {"exp_type": abstraction_level, "dataset": metadata["dataset"]}
+            )
+
+        new_abstractions = [
+            INSTRUCTIONS["icl"]["key"] + doc for doc in new_abstractions
+        ]
+
+        try:
+            self.collection.add(
+                documents=new_abstractions,
+                metadatas=new_metadatas,
+                ids=new_ids,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not add add abstractions. ChromaDB raised:\n{e}"
+            )
+
+        if return_ids:
+            return f"Added {len(new_ids)} new abstractions", new_ids
+        else:
+            return f"Added {len(new_ids)} new abstractions", None
+
+    def generate_features(
+        self,
+        ds,
+        df_train,
+        exp_type,
+        use_experience,
+        store_experience,
+        keep_top_n: int = 3,
+        min_feat_score: float = 0,
+        keep_logs: bool = False,
+    ):
+        
+        (
+            self.code,
+            prompt,
+            messages,
+            new_f_code,
+            log_feat_eng,
+            log_errors,
+        ) = racaafe.generate_features(
+            ds,
+            df_train,
+            self.collection,
+            exp_type,
+            # use_experience,
+            model=self.llm_model,
+            iterative=self.iterations,
+            metric_used=auc_metric,
+            iterative_method=self.base_classifier,
+            display_method="print",
+            n_splits=self.n_splits,
+            n_repeats=self.n_repeats,
+            keep_logs=keep_logs,
+        )
+
+        logging.info(f'new_f_code:\n{new_f_code}')
+        logging.info(f'log_feat_eng:\n{log_feat_eng}')
+        logging.info(f'log_errors:\n{log_errors}')
+
+        f_importances = None
+        # len(new_f_code.keys()) > 0 = Check if any engineered features were
         # kept
-        if store_experience and len(new_f_code.keys()) > 0:
-            samples = racaafe.get_data_samples(df_train)    
+        if len(new_f_code.keys()) > 0 and (store_experience or keep_logs):
+            samples = racaafe.get_data_samples(df_train)
+
+            start_f_importances = timer()
 
             f_importances = racaafe.get_feat_importances(
                 self.code,
@@ -619,11 +731,81 @@ class RACAAFEClassifier(CAAFEClassifier):
                 samples,
             )
 
+            logging.info(f'f_importances:\n{f_importances}')
+
+            end_f_importances = timer()
+
+            log_time = pd.DataFrame(
+                {
+                    "label": ["f_importances"],
+                    "DataName": [ds[0]],
+                    "time": [end_f_importances - start_f_importances],
+                }
+            )
+
+            log_time.to_csv(
+                "logs/Time.csv",
+                index=False,
+                mode="a",
+                sep=";",
+                header=False,
+                decimal=",",
+            )
+
             # Only proceed if at least one added features has a positive feature
             # importance.
-            if f_importances.apply(lambda x: x > 0).any(axis=1).values[0]:
+            if (
+                store_experience
+                & f_importances.apply(lambda x: x >= min_feat_score).any(axis=1).values[0]
+            ):
                 racaafe.store_experiences(
-                    new_f_code, f_importances, samples, ds, self.embed_model, self.collection
+                    new_f_code,
+                    f_importances,
+                    samples,
+                    ds,
+                    self.embed_model,
+                    self.collection,
+                    keep_top_n,
+                    min_score=min_feat_score,
                 )
 
-        return self.code, prompt, messages, new_f_code
+        if keep_logs:
+            log_feat_eng = add_feat_importance_fe_log(
+                log_feat_eng, new_f_code, f_importances
+            )
+
+            logging.info(f"log_feat_eng with rank:\n{log_feat_eng}")
+
+        return (
+            self.code,
+            prompt,
+            messages,
+            new_f_code,
+            f_importances,
+            log_feat_eng,
+            log_errors,
+        )
+
+    def set_summarized_descriptions(self, datasets: list) -> list:
+        for i in range(len(datasets)):
+            ds, df_train, df_test, _, _ = data.get_data_split(
+                datasets[i], set_clean_description=False, seed=None
+            )
+
+            target_column_name = datasets[i][4][-1]
+            dataset_description = datasets[i][-1]
+
+            df_train, df_test = make_datasets_numeric(
+                df_train, df_test, target_column_name
+            )
+
+            samples = racaafe.get_data_samples(df_train)
+
+            summary = racaafe.summmarize_context(
+                self.llm_model, dataset_description, samples
+            )
+
+            # Replace raw description with summarized version
+            datasets[i][-1] = summary
+
+        return datasets
