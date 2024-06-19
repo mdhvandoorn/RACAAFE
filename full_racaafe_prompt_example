@@ -1,0 +1,182 @@
+The dataframe df is loaded and in memory. Columns are also named attributes.
+
+Description of the dataset in df (column dtypes might be inaccurate):
+
+Global Summary
+The dataset contains personal records from the Spaceship Titanic, where passengers were transported to an alternate dimension due to a collision with a spacetime anomaly. It includes information such as HomePlanet, CryoSleep status, Cabin details, Destination, Age, VIP status, billing amounts at various amenities, passenger names, and the target variable Transported.
+
+Columns Summary
+
+    PassengerId (object): Unique identifier for each passenger.
+    HomePlanet (object): The planet the passenger departed from.
+    CryoSleep (bool): Indicates if the passenger elected to be in suspended animation during the voyage.
+    Cabin (object): Cabin number where the passenger stayed.
+    Destination (object): The planet the passenger will be debarking to.
+    Age (float64): The age of the passenger.
+    VIP (bool): Indicates whether the passenger paid for VIP service.
+    RoomService, FoodCourt, ShoppingMall, Spa, VRDeck (float64): Amount billed at different amenities.
+    Name (object): First and last names of the passenger.
+    Transported (category): Target variable indicating whether the passenger was transported to another dimension.
+
+Columns in df (true feature dtypes listed here, categoricals encoded as int):
+
+    PassengerId (object): NaN-freq [0.0%], Samples ['2581_01', '8653_01', '8410_01', '3022_01', '9178_01', '4352_01', '8658_01', '3921_01', '4563_01', '1844_02']
+    HomePlanet (object): NaN-freq [0.0%], Samples ['Earth', 'Earth', 'Earth', 'Europa', 'Earth', 'Europa', 'Mars', 'Earth', 'Europa', 'Earth']
+    CryoSleep (bool): NaN-freq [0.0%], Samples [False, True, False, False, False, False, False, False, True, True]
+    Cabin (object): NaN-freq [0.0%], Samples ['E/156/P', 'G/1393/S', 'F/1615/S', 'C/102/P', 'F/1877/P', 'C/157/S', 'E/568/S', 'E/262/S', 'C/169/S', 'G/289/S']
+    Destination (object): NaN-freq [0.0%], Samples ['TRAPPIST-1e', 'TRAPPIST-1e', 'TRAPPIST-1e', 'TRAPPIST-1e', 'TRAPPIST-1e', 'TRAPPIST-1e', 'TRAPPIST-1e', 'TRAPPIST-1e', '55 Cancri e', 'TRAPPIST-1e']
+    Age (float64): NaN-freq [0.0%], Samples [20.0, 50.0, 52.0, 38.0, 53.0, 37.0, 49.0, 26.0, 19.0, 2.0]
+    VIP (bool): NaN-freq [0.0%], Samples [False, False, False, False, False, False, False, False, False, False]
+    RoomService (float64): NaN-freq [0.0%], Samples [496.0, 0.0, 289.0, 0.0, 49.0, 33.0, 0.0, 35.0, 0.0, 0.0]
+    FoodCourt (float64): NaN-freq [0.0%], Samples [20.0, 0.0, 302.0, 3331.0, 584.0, 3484.0, 1.0, 42.0, 0.0, 0.0]
+    ShoppingMall (float64): NaN-freq [0.0%], Samples [16.0, 0.0, 0.0, 270.0, 0.0, 17.0, 1364.0, 711.0, 0.0, 0.0]
+    Spa (float64): NaN-freq [0.0%], Samples [0.0, 0.0, 112.0, 2.0, 0.0, 4.0, 226.0, 0.0, 0.0, 0.0]
+    VRDeck (float64): NaN-freq [0.0%], Samples [254.0, 0.0, 0.0, 3510.0, 70.0, 1384.0, 0.0, 0.0, 0.0, 0.0]
+    Name (object): NaN-freq [0.0%], Samples ['Eulah Conney', 'Racily Bairdyork', 'Joyn Guezaley', 'Ankab Speating', 'Ernard Barnoldeney', 'Alaton Trupistic', 'Ney Forne', 'Felice Kramosley', 'Altanin Switud', 'Garley Stannondez']
+    Transported (category): NaN-freq [0.0%], Samples [False, True, False, False, False, True, True, True, True, True]
+
+This code was written by an expert data scientist working to improve predictions. It is a snippet of code that adds new columns to the dataset.
+
+Number of samples (rows) in training dataset: 1500
+
+This code generates additional columns that are useful for a downstream classification algorithm (such as XGBoost) predicting "Transported." Additional columns add new semantic information, utilizing real-world knowledge of the dataset. They can include feature combinations, transformations, and aggregations where the new column is a function of existing columns.
+
+The scale of columns and offset do not matter. Ensure all used columns exist. Follow the above description of columns closely and consider the data types and meanings of classes.
+
+This code also drops columns if they may be redundant and hurt the predictive performance of the downstream classifier (feature selection). Dropping columns can help reduce the chance of overfitting, especially if the dataset is small.
+
+The classifier will be trained on the dataset with the generated columns and evaluated on a holdout set. The evaluation metric is accuracy. The best performing code will be selected.
+
+Added columns can be used in other code blocks, while dropped columns are no longer available.
+
+Code formatting for each added column:
+
+python
+
+# (Feature name and description)
+# Usefulness: (Description why this adds useful real-world knowledge to classify "Transported" according to dataset description and attributes.)
+# Input samples: (Three samples of the columns used in the following code, e.g. 'PassengerId': ['2581_01', '8653_01', '8410_01'], 'HomePlanet': ['Earth', 'Earth', 'Earth'], ...)
+(Some pandas code using 'PassengerId', 'HomePlanet', ... to add a new column for each row in df)
+```end
+
+**Code formatting for dropping columns:**
+```python
+# Explanation why the column XX is dropped
+df.drop(columns=['XX'], inplace=True)
+```end
+
+---
+
+Below are lessons from the most successful feature engineering operations on other datasets. These lessons may not be directly applicable to the current dataset. Rather, use them to inform the feature engineering operation on the current dataset that you are about to propose. Each lesson consists of two components: 
+1. The context component contains information about the dataset. 
+2. The insight component contains insights that are derived from the most successful feature engineering operations on the dataset.
+
+---
+
+**Lessons:**
+
+**Context:**
+
+**Description of the dataset (stored in 'df'):**
+**Global Summary**
+The dataset is an Airlines dataset inspired by a regression dataset from Elena Ikonomovska. The objective is to predict flight delays based on scheduled departure information.
+
+**Columns Summary**
+- **Airline (int32):** Represents the unique identifier for the airline. Values are integers.
+- **Flight (float64):** Indicates the flight number. Values are floats.
+- **AirportFrom (float64):** Denotes the code of the departure airport. Values are floats.
+- **AirportTo (float64):** Represents the code of the destination airport. Values are floats.
+- **DayOfWeek (int32):** Indicates the day of the week the flight is scheduled. Values are integers.
+- **Time (float64):** Represents the scheduled departure time. Values are floats.
+- **Length (float64):** Indicates the duration of the flight. Values are floats.
+- **Delay (category):** Represents whether the flight was delayed (1) or not delayed (0). Values are categorical.
+
+**Insights:**
+1. Feature engineering operations involve creating new features from existing ones to improve model performance.
+2. Patterns suggest that adding features related to flight specifics, such as distance or time of day, can be beneficial.
+3. Calculating differences or applying conditions to existing features can capture important relationships.
+4. The created features should align with the problem domain and provide meaningful information for prediction.
+5. These observations emphasize the importance of domain knowledge and creativity in feature engineering for enhancing model predictive power.
+
+---
+
+**Context:**
+
+**Description of the dataset (stored in 'df'):**
+**Global Summary**
+This dataset is the Balance Scale Weight & Distance Database, generated to model psychological experimental results. It classifies examples as tipping to the right, tipping to the left, or being balanced based on left and right weights and distances. The class is determined by comparing the products of weight and distance on each side.
+
+**Columns Summary**
+- **left-weight (float64):**
+  - Data type: Continuous numerical
+  - Meaning: Represents the weight on the left side of the balance scale.
+  - Values: Continuous numerical values indicating the weight on the left side.
+  
+- **left-distance (float64):**
+  - Data type: Continuous numerical
+  - Meaning: Denotes the distance of the weight on the left side from the fulcrum.
+  - Values: Continuous numerical values representing the distance on the left side.
+  
+- **right-weight (float64):**
+  - Data type: Continuous numerical
+  - Meaning: Indicates the weight on the right side of the balance scale.
+  - Values: Continuous numerical values showing the weight on the right side.
+  
+- **right-distance (float64):**
+  - Data type: Continuous numerical
+  - Meaning: Signifies the distance of the weight on the right side from the fulcrum.
+  - Values: Continuous numerical values denoting the distance on the right side.
+  
+- **class (category):**
+  - Data type: Categorical
+  - Meaning: Represents the class of the example - tipping to the right, tipping to the left, or balanced.
+  - Values: Categorical values (0, 1, 2) indicating the class of the example.
+
+**Insights:**
+1. The best feature engineering operations involved creating new features based on mathematical relationships between existing features.
+2. These operations exploited the inherent balance and weight distribution characteristics of the dataset to derive meaningful new features.
+3. The created features enhanced the model's performance by capturing important interactions between weight, distance, and balance, which are crucial in determining the class labels.
+
+---
+
+**Context:**
+
+**Description of the dataset (stored in 'df'):**
+**Global Summary**
+This dataset is part of a collection based on the game "Jungle Chess" (Dou Shou Qi) and contains tablebases representing different piece combinations. It is suitable for classification tasks similar to the King and Rook vs. King problem.
+
+**Columns Summary**
+- **white_piece0_strength (float64):** Represents the strength of the white piece 0.
+  - Values: Floating-point numbers indicating the strength of the white piece.
+  
+- **white_piece0_file (float64):** Indicates the file position of white piece 0.
+  - Values: Floating-point numbers representing the file position of the white piece.
+  
+- **white_piece0_rank (float64):** Denotes the rank position of white piece 0.
+  - Values: Floating-point numbers indicating the rank position of the white piece.
+  
+- **black_piece0_strength (float64):** Represents the strength of the black piece 0.
+  - Values: Floating-point numbers indicating the strength of the black piece.
+  
+- **black_piece0_file (float64):** Indicates the file position of black piece 0.
+  - Values: Floating-point numbers representing the file position of the black piece.
+  
+- **black_piece0_rank (float64):** Denotes the rank position of black piece 0.
+  - Values: Floating-point numbers indicating the rank position of the black piece.
+  
+- **class (category):** Represents the classification category.
+  - Values: Categorical values indicating the class of the game outcome.
+
+**Insights:**
+1. Utilizing mathematical operations such as addition, subtraction, and averaging on existing features can create new informative features.
+2. Incorporating features that capture relationships between existing features can enhance model performance.
+3. Feature engineering operations should aim to introduce new dimensions of information that complement the existing dataset characteristics.
+4. The best feature engineering operations tend to focus on enhancing the representation of key attributes related to the classification task.
+
+---
+
+Return a single codeblock that either adds a single useful column OR drops a single irrelevant column (Feature Selection).
+
+Each codeblock ends with ```end and starts with "```python"
+
+**Codeblock:**
